@@ -7,10 +7,10 @@ const stages = [
     subtitle: "the spark",
     color: "#E8725A",
     icon: "✏️",
-    oneliner: "comfyui is the cockpit. clip is the translator. our words become coordinates.",
-    plain: `we type "a worn photograph of a figure dissolving into teal light, analog grain, CRT static" into ComfyUI. these words are about to become numbers. every single word lands at a coordinate in meaning-space, and the distance between those coordinates shapes our image. this is why word choice matters more than word count. "dissolving" and "fading" land in similar territory but pull different visual results. when we understand this, we stop prompting like we're describing a picture and start prompting like we're placing pins on a map. the CLIP encoder doesn't read our prompt left to right like we do. it maps every word into meaning-space simultaneously. "teal" lands near "cyan." "dissolving" lands near "fading." this is why rearranging our prompt words barely changes the output, but swapping a single adjective can shift everything. prompt engineering isn't about order. it's about choosing words that land in the right neighborhood of meaning-space.`,
-    detail: `the CLIP text encoder (running on GPU) turns each word into a vector ... a list of ~768 numbers representing meaning. "teal" becomes a coordinate in meaning-space near "cyan" and "blue-green." "dissolving" lands near "fading" and "disappearing." our full prompt becomes a matrix of these vectors. a map of what we want, written in math.`,
-    hardware: `CLIP encoder runs a forward pass through a transformer. weights sit in VRAM (~1.5GB). tensor cores do the matrix multiplications. output: a conditioning tensor (our prompt as pure numbers) sitting in VRAM, ready to guide every denoising step that follows.`
+    oneliner: "comfyui is the cockpit. clip + t5 are the translators. our words become coordinates.",
+    plain: `we type "a worn photograph of a figure dissolving into teal light, analog grain, CRT static" into ComfyUI. these words are about to become numbers. Flux uses two text encoders: CLIP maps the overall vibe into a single summary vector, while T5-XXL processes each word into a 4,096-number coordinate in meaning-space. "teal" lands near "cyan." "dissolving" lands near "fading." swapping a single word can shift the entire output because it moves the coordinate. when we understand this, we stop prompting like we're describing a picture and start prompting like we're placing pins on a map.`,
+    detail: `Flux uses two text encoders. CLIP gives a high-level summary (768 numbers). T5-XXL does the heavy lifting, turning each word into a vector of 4,096 numbers representing meaning. "Teal" becomes a coordinate in meaning-space near "cyan" and "blue-green." "Dissolving" lands near "fading" and "disappearing." Our full prompt becomes a matrix of these vectors. A map of what we want, written in math.`,
+    hardware: `Two text encoders run on GPU. CLIP produces a pooled 768-dim summary vector (~400MB weights). T5-XXL produces per-token 4,096-dim embeddings, the main conditioning that guides the image (~4.5GB weights). Tensor cores do the matrix multiplications for both. Output: conditioning tensors sitting in VRAM, ready to guide every denoising step that follows.`
   },
   {
     id: "noise",
@@ -54,7 +54,7 @@ const stages = [
     oneliner: "pytorch is where the math happens. each step peels a layer of noise off our image.",
     plain: `over 20-30 steps, the model looks at the noisy image and our prompt, then predicts what noise to remove. each step peels away a thin layer of static. step 1: vague shapes emerge from nothing. step 10: composition and color take form. step 20: structure solidifies. step 30: fine details and textures sharpen. we're watching the model think its way from chaos to coherence. this is why denoise strength matters in img2img. at 0.7, we skip the first 30% of steps ... the large-scale structure is already set by our input image. at 1.0, it starts from pure noise. understanding which steps control structure vs detail is how we get precise creative control. for our workflow: early steps decide composition, late steps decide detail. if our compositions are off, more steps won't fix it. change the prompt or seed instead. steps beyond 30 on flux are usually wasted compute.`,
     detail: `each step is a full forward pass through the Flux transformer. the model takes the noisy latent + prompt conditioning + guidance value + timestep and outputs a noise prediction. the network doesn't predict the final image directly ... it predicts what noise is present at this step. subtract that predicted noise (scaled by the sampler) and we get a slightly cleaner latent. the timestep tells the model how noisy the current state is, which changes its behavior. early steps (high noise) focus on large-scale structure. late steps (low noise) focus on fine detail.`,
-    hardware: `each of our 30 steps pushes the full Flux model through the tensor cores. that's all 19 double-stream blocks and 38 single-stream blocks, each containing multi-head attention + feedforward layers. for a single 1024px generation at 30 steps, the 5090 executes roughly 30 × (57 transformer blocks × multiple matrix ops per block) = thousands of large matrix multiplications. total compute: hundreds of teraflops per image. at the 5090's ~1,600 TFLOPS of FP8 throughput, this takes seconds. a CPU would take hours.`
+    hardware: `each of our 30 steps pushes the full Flux model through the tensor cores. that's all 19 double-stream blocks and 38 single-stream blocks, each containing multi-head attention + feedforward layers. for a single 1024px generation at 30 steps, the 5090 executes thousands of large matrix multiplications. at the 5090's ~419 TFLOPS dense FP8 (or ~838 with sparsity), this takes seconds. a CPU would take hours.`
   },
   {
     id: "sampler",
@@ -76,7 +76,7 @@ const stages = [
     oneliner: "32gb sounds like a lot. flux dev uses 28-30gb of it. every byte has a job.",
     plain: `the 5090 has 32GB of video memory. think of it as a workspace desk. the model weights (the learned knowledge) take up most of the desk ... about 23GB for Flux Dev. the latent image being worked on is tiny, under 1MB. but during each step, the attention layers create huge temporary scratchpads (activation memory) that spike to 4-6GB. the VAE decoder needs its own space at the end. everything has to fit on the desk at once or generation fails. this is why we can't just "run a bigger model" ... it's not about compute speed, it's about whether the whole pipeline fits in memory at once. and it's why quantization (FP8, NF4) matters ... it shrinks model weights so we can reclaim desk space for higher resolutions or stacking LoRAs.`,
     detail: `VRAM allocation breakdown for Flux Dev at 1024×1024: model weights ~23GB (FP16 Flux transformer + text encoders + VAE). latent tensor ~0.5MB (128×128×16 channels). kV cache for attention ~1-2GB (stores key/value pairs across layers). activation memory ~4-6GB (intermediate tensors during forward pass, freed after each layer via gradient checkpointing). optimizer states: 0 (inference only). total peak: ~28-30GB of 32GB. flash attention helps here by never materializing the full attention matrix, saving gigabytes of activation memory. this is why Flux Dev fits on a 5090 but struggles on 24GB cards without quantization. running FP8 quantization drops model weights to ~12GB, giving us breathing room for higher resolutions.`,
-    hardware: `the 32GB GDDR7 on the 5090 connects via a 512-bit memory bus at ~1,792 GB/s bandwidth. during each denoising step, the entire model weights need to be read from VRAM into the streaming multiprocessors (SMs). that's ~23GB read per step. at 1,792 GB/s, reading 23GB takes ~13ms. for 30 steps, just the weight reads alone take ~390ms. add activation read/writes and you see why memory bandwidth, not compute, is typically the bottleneck for image generation. the 5090's GDDR7 is a significant upgrade over the 4090's GDDR6X specifically because of this.`
+    hardware: `the 32GB GDDR7 on the 5090 connects via a 512-bit memory bus at 1,792 GB/s bandwidth. during inference, model weights stay resident in VRAM and get read into the streaming multiprocessors as needed. the L2 cache (98MB on the 5090) helps by keeping frequently accessed weights close, but the full ~22GB of model weights still need to flow through the memory bus over the course of each step. at 1,792 GB/s, this is fast but still the tightest bottleneck in the pipeline. the 5090's GDDR7 is a 77% bandwidth upgrade over the 4090's GDDR6X (1,008 GB/s), which directly translates to faster generation times.`
   },
   {
     id: "resolution",
@@ -104,8 +104,8 @@ const stages = [
 
 const VRAMBar = () => {
   const segments = [
-    { label: "flux transformer", gb: 23, color: "#E8725A" },
-    { label: "text encoders", gb: 1.5, color: "#B080D0" },
+    { label: "flux transformer", gb: 17, color: "#E8725A" },
+    { label: "text encoders (clip + t5)", gb: 5, color: "#B080D0" },
     { label: "VAE", gb: 0.3, color: "#3DB8A9" },
     { label: "activations (peak)", gb: 5, color: "#E8C84A" },
     { label: "kv cache", gb: 1.5, color: "#6AACB8" },
@@ -234,130 +234,135 @@ const ResolutionScale = () => {
 
 const FlowDiagram = () => {
   const nodes = [
-    { label: "our prompt", sub: "text string", color: "#E8725A", hw: "CPU → GPU" },
-    { label: "clip encoder", sub: "words → vectors", color: "#E8725A", hw: "tensor cores" },
-    { label: "conditioning tensor", sub: "prompt as numbers in vram", color: "#B080D0", hw: "vram (1.5gb)" },
-    { label: "torch.randn()", sub: "generate pure noise latent", color: "#3DB8A9", hw: "cuda cores" },
-    { label: "noisy latent", sub: "128×128×16 channels", color: "#3DB8A9", hw: "vram (~0.5mb)" },
-    { label: "flux transformer", sub: "57 blocks × 30 steps", color: "#E8925A", hw: "tensor cores (90%)" },
-    { label: "self-attention", sub: "every patch ↔ every patch (via flash attention)", color: "#E8C84A", hw: "tensor cores" },
-    { label: "cross-attention", sub: "image patches ↔ prompt tokens", color: "#E8C84A", hw: "tensor cores" },
-    { label: "feedforward layers", sub: "transform activations", color: "#E8925A", hw: "tensor cores" },
-    { label: "noise prediction", sub: "model output per step", color: "#C4A882", hw: "vram" },
-    { label: "sampler (euler / dpm++)", sub: "subtract noise, update latent", color: "#C4A882", hw: "cuda cores" },
+    { label: "our prompt", sub: "text string", color: "#E8725A", hw: "cpu → gpu" },
+    { label: "clip + t5 encoders", sub: "words → vectors", color: "#E8725A", hw: "tensor cores" },
+    { label: "conditioning tensors", sub: "in vram", color: "#B080D0", hw: "~5gb" },
+    { label: "torch.randn()", sub: "noise from seed", color: "#3DB8A9", hw: "cuda cores" },
+    { label: "noisy latent", sub: "128×128×16", color: "#3DB8A9", hw: "~0.5mb" },
+    { label: "flux transformer", sub: "57 blocks", color: "#E8925A", hw: "tensor cores" },
+    { label: "attention", sub: "self + cross (flash)", color: "#E8C84A", hw: "tensor cores" },
+    { label: "feedforward", sub: "transform", color: "#E8925A", hw: "tensor cores" },
+    { label: "noise prediction", sub: "what to remove", color: "#C4A882", hw: "vram" },
+    { label: "sampler", sub: "euler / dpm++", color: "#C4A882", hw: "cuda cores" },
     { label: "denoised latent", sub: "128×128 clean", color: "#6AACB8", hw: "vram" },
-    { label: "vae decoder", sub: "decompress to pixels", color: "#3DB8A9", hw: "tensor cores" },
-    { label: "1024×1024 image", sub: "rgb pixels → png saved", color: "#3DB8A9", hw: "vram → pcie → disk" },
+    { label: "vae decoder", sub: "decompress", color: "#3DB8A9", hw: "tensor cores" },
+    { label: "1024×1024 image", sub: "png saved", color: "#3DB8A9", hw: "disk" },
   ];
 
   const loopStart = 5;
-  const loopEnd = 10;
+  const loopEnd = 9;
+
+  const nodeH = 44;
+  const arrowH = 24;
+  const totalH = nodes.length * nodeH + (nodes.length - 1) * arrowH;
+  const loopX = 420;
+
+  const getY = (i) => i * (nodeH + arrowH);
 
   return (
-    <div style={{ marginTop: 4, position: "relative" }}>
-      {nodes.map((node, i) => (
-        <div key={i}>
-          <div style={{
-            display: "grid",
-            gridTemplateColumns: "1fr auto",
-            gap: 12,
-            alignItems: "center",
-            padding: "10px 14px",
-            background: i >= loopStart && i <= loopEnd
-              ? "rgba(232, 146, 90, 0.04)"
-              : "transparent",
-            borderRadius: 8,
-            borderLeft: i >= loopStart && i <= loopEnd
-              ? "2px solid rgba(232, 146, 90, 0.2)"
-              : "2px solid transparent",
-            position: "relative"
-          }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <div style={{
-                width: 8,
-                height: 8,
-                borderRadius: "50%",
-                background: node.color,
-                flexShrink: 0,
-                boxShadow: `0 0 8px ${node.color}33`
-              }} />
-              <div>
-                <div style={{
-                  fontSize: 12,
-                  color: "#e0e0e0",
-                  fontFamily: "'JetBrains Mono', monospace",
-                  fontWeight: 600
-                }}>
-                  {node.label}
-                </div>
-                <div style={{
-                  fontSize: 10,
-                  color: "#aaa",
-                  fontFamily: "'JetBrains Mono', monospace",
-                  marginTop: 1
-                }}>
-                  {node.sub}
-                </div>
-              </div>
-            </div>
-            <div style={{
-              fontSize: 9,
-              color: "#d5d5d5",
-              fontFamily: "'JetBrains Mono', monospace",
-              letterSpacing: 0.5,
-              textAlign: "right",
-              whiteSpace: "nowrap"
-            }}>
-              {node.hw}
-            </div>
-          </div>
+    <div style={{ marginTop: 4, position: "relative", overflowX: "auto" }}>
+      <svg width="100%" viewBox={`0 0 480 ${totalH + 20}`} style={{ minWidth: 400 }}>
+        {/* Loop bracket on the right side */}
+        <line
+          x1={loopX} y1={getY(loopStart) + nodeH / 2}
+          x2={loopX} y2={getY(loopEnd) + nodeH / 2}
+          stroke="#E8925A" strokeWidth="1.5" strokeDasharray="4 3" opacity="0.5"
+        />
+        <line
+          x1={loopX - 8} y1={getY(loopStart) + nodeH / 2}
+          x2={loopX} y2={getY(loopStart) + nodeH / 2}
+          stroke="#E8925A" strokeWidth="1.5" opacity="0.5"
+        />
+        <line
+          x1={loopX - 8} y1={getY(loopEnd) + nodeH / 2}
+          x2={loopX} y2={getY(loopEnd) + nodeH / 2}
+          stroke="#E8925A" strokeWidth="1.5" opacity="0.5"
+        />
+        {/* Loop arrow pointing back up */}
+        <polygon
+          points={`${loopX - 4},${getY(loopStart) + nodeH / 2 + 6} ${loopX},${getY(loopStart) + nodeH / 2 - 2} ${loopX + 4},${getY(loopStart) + nodeH / 2 + 6}`}
+          fill="#E8925A" opacity="0.6"
+        />
+        <text
+          x={loopX + 8} y={getY(loopStart) + (getY(loopEnd) - getY(loopStart)) / 2 + nodeH / 2 + 4}
+          fill="#E8925A" fontSize="9" fontFamily="'JetBrains Mono', monospace" opacity="0.7"
+          transform={`rotate(90, ${loopX + 8}, ${getY(loopStart) + (getY(loopEnd) - getY(loopStart)) / 2 + nodeH / 2 + 4})`}
+        >
+          × 30 steps
+        </text>
 
-          {i < nodes.length - 1 && (
-            <div style={{
-              display: "flex",
-              alignItems: "center",
-              paddingLeft: 17,
-              height: 16,
-              position: "relative"
-            }}>
-              <div style={{
-                width: 1,
-                height: "100%",
-                background: i >= loopStart - 1 && i < loopEnd
-                  ? "rgba(232, 146, 90, 0.25)"
-                  : "rgba(255,255,255,0.1)"
-              }} />
-              {i === loopStart - 1 && (
-                <span style={{
-                  position: "absolute",
-                  left: 30,
-                  fontSize: 9,
-                  color: "#E8925A",
-                  fontFamily: "'JetBrains Mono', monospace",
-                  letterSpacing: 1.5
-                }}>
-                  ↓ repeat × 30 steps
-                </span>
-              )}
-              {i === loopEnd && (
-                <span style={{
-                  position: "absolute",
-                  left: 30,
-                  fontSize: 9,
-                  color: "#E8925A",
-                  fontFamily: "'JetBrains Mono', monospace",
-                  letterSpacing: 1.5
-                }}>
-                  ↑ loop back if steps remain
-                </span>
-              )}
-            </div>
-          )}
-        </div>
-      ))}
+        {nodes.map((node, i) => {
+          const y = getY(i);
+          const inLoop = i >= loopStart && i <= loopEnd;
 
+          return (
+            <g key={i}>
+              {/* Node background */}
+              <rect
+                x={8} y={y}
+                width={400} height={nodeH}
+                rx={8} ry={8}
+                fill={inLoop ? "rgba(232, 146, 90, 0.06)" : "rgba(255,255,255,0.02)"}
+                stroke={node.color} strokeWidth={0.5} strokeOpacity={0.3}
+              />
+
+              {/* Colored dot */}
+              <circle
+                cx={24} cy={y + nodeH / 2}
+                r={4} fill={node.color}
+              />
+
+              {/* Label */}
+              <text
+                x={38} y={y + 18}
+                fill="#e0e0e0" fontSize="11.5"
+                fontFamily="'JetBrains Mono', monospace" fontWeight="600"
+              >
+                {node.label}
+              </text>
+
+              {/* Subtitle */}
+              <text
+                x={38} y={y + 33}
+                fill="#999" fontSize="9.5"
+                fontFamily="'JetBrains Mono', monospace"
+              >
+                {node.sub}
+              </text>
+
+              {/* Hardware label right-aligned */}
+              <text
+                x={396} y={y + nodeH / 2 + 4}
+                fill="#bbb" fontSize="9"
+                fontFamily="'JetBrains Mono', monospace"
+                textAnchor="end"
+              >
+                {node.hw}
+              </text>
+
+              {/* Arrow to next node */}
+              {i < nodes.length - 1 && (
+                <g>
+                  <line
+                    x1={24} y1={y + nodeH}
+                    x2={24} y2={y + nodeH + arrowH}
+                    stroke={inLoop || (i + 1 >= loopStart && i + 1 <= loopEnd) ? "#E8925A" : "rgba(255,255,255,0.15)"}
+                    strokeWidth={inLoop ? 1.5 : 1}
+                  />
+                  <polygon
+                    points={`${24 - 3},${y + nodeH + arrowH - 5} ${24},${y + nodeH + arrowH} ${24 + 3},${y + nodeH + arrowH - 5}`}
+                    fill={inLoop || (i + 1 >= loopStart && i + 1 <= loopEnd) ? "#E8925A" : "rgba(255,255,255,0.2)"}
+                  />
+                </g>
+              )}
+            </g>
+          );
+        })}
+      </svg>
+
+      {/* Legend */}
       <div style={{
-        marginTop: 16,
+        marginTop: 12,
         padding: "10px 14px",
         background: "rgba(255,255,255,0.02)",
         borderRadius: 8,
@@ -389,7 +394,7 @@ const Takeaways = () => {
     {
       num: "01",
       title: "prompts are coordinates, not descriptions",
-      text: "each word lands at a specific point in a 768-dimensional meaning-space. the distance between those points determines how our image forms. prompting well means understanding where words sit relative to each other, not just what they mean to us.",
+      text: "each word lands at a specific point in a 4,096-dimensional meaning-space (via T5-XXL). the distance between those points determines how our image forms. prompting well means understanding where words sit relative to each other, not just what they mean to us.",
       color: "#E8725A"
     },
     {
@@ -407,13 +412,13 @@ const Takeaways = () => {
     {
       num: "04",
       title: "vram bandwidth is the real bottleneck, not compute",
-      text: "the 5090's tensor cores can crunch numbers faster than memory can feed them data. generation speed is limited by how fast 23gb of model weights can be read from vram each step (1,792 gb/s). this is why gddr7 matters more than raw tflops for image generation.",
+      text: "the 5090's tensor cores can crunch numbers faster than memory can feed them data. generation speed is limited by how fast 23gb of model weights can be read from vram each step (1,792 gb/s). both compute power and memory speed matter, but for image generation, faster vram (gddr7) often has a more noticeable impact on generation time than adding more cores.",
       color: "#6AACB8"
     },
     {
       num: "05",
       title: "the sampler and scheduler are separate creative controls",
-      text: "the sampler decides the path through latent space (euler = straight, dpm++ = curved). the scheduler decides the pace (karras = aggressive early, gentle late). most artists treat these as one dropdown. they're two independent levers that compound. karras + dpm++ 2m is almost always the optimal pairing for quality per step.",
+      text: "the sampler decides the path through latent space (euler = straight, dpm++ = curved). the scheduler decides the pace (karras = aggressive early, gentle late). most artists treat these as one dropdown. they're two independent levers that compound. understanding what each one does lets you make intentional choices instead of guessing.",
       color: "#C4A882"
     }
   ];
