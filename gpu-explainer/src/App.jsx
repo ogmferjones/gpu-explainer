@@ -394,7 +394,7 @@ const Takeaways = () => {
     {
       num: "01",
       title: "prompts are coordinates, not descriptions",
-      text: "each word lands at a specific point in a 4,096-dimensional meaning-space (via T5-XXL). the distance between those points determines how our image forms. prompting well means understanding where words sit relative to each other, not just what they mean to us.",
+      text: "each word in our prompt gets converted to a point in a 4,096-dimensional meaning-space (via T5-XXL). words with similar meanings land near each other. 'dissolving' and 'fading' are neighbors. 'dissolving' and 'brick' are far apart. the model uses those distances to decide how concepts blend visually. we can't see this space directly, but we learn it through iteration: swap one word, see what shifts, build intuition about which words pull similar results and which ones diverge.",
       color: "#E8725A"
     },
     {
