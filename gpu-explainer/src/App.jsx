@@ -21,7 +21,7 @@ const stages = [
     oneliner: "the seed is the starting point. the gpu rolls the dice. every image begins as static.",
     plain: `the GPU generates a small block of pure random static. think TV snow. this is our starting point ... a 128×128 grid of random numbers (for a 1024px image). our image is hiding inside this noise like a sculpture inside a block of marble. the model's entire job is to chisel it out. and yes, that seed number you keep rerolling? it determines the exact pattern of this static. same seed, same marble block, same sculpture. this is why locking a seed and changing only the prompt lets us iterate on composition without losing the underlying structure we liked.`,
     detail: `PyTorch calls torch.randn() which triggers CUDA's random number generator across thousands of cores simultaneously. each core generates its own random values. the result is a "latent" tensor, much smaller than the final image because it works in compressed space. a 1024×1024 image is only 128×128×16 channels in latent space. the seed we set in KSampler determines the exact pattern of this noise.`,
-    hardware: `CUDA cores (not tensor cores) handle random number generation. each of the 21,760 CUDA cores can generate random values independently. the latent tensor allocates ~4MB in VRAM. tiny compared to the model weights (~23GB for Flux Dev). the seed initializes the pseudorandom number generator state, which is why the same seed gives the same image.`
+    hardware: `CUDA cores (not tensor cores) handle random number generation. each of the 21,760 CUDA cores can generate random values independently. the latent tensor allocates ~4MB in VRAM. tiny compared to the model weights (~22GB for Flux Dev). the seed initializes the pseudorandom number generator state, which is why the same seed gives the same image.`
   },
   {
     id: "guidance",
@@ -52,7 +52,7 @@ const stages = [
     color: "#E8925A",
     icon: "🔄",
     oneliner: "pytorch is where the math happens. each step peels a layer of noise off our image.",
-    plain: `over 20-30 steps, the model looks at the noisy image and our prompt, then predicts what noise to remove. each step peels away a thin layer of static. step 1: vague shapes emerge from nothing. step 10: composition and color take form. step 20: structure solidifies. step 30: fine details and textures sharpen. we're watching the model think its way from chaos to coherence. this is why denoise strength matters in img2img. at 0.7, we skip the first 30% of steps ... the large-scale structure is already set by our input image. at 1.0, it starts from pure noise. understanding which steps control structure vs detail is how we get precise creative control. for our workflow: early steps decide composition, late steps decide detail. if our compositions are off, more steps won't fix it. change the prompt or seed instead. steps beyond 30 on flux are usually wasted compute.`,
+    plain: `over 20-30 steps, the model looks at the noisy image and our prompt, then predicts what noise to remove. each step peels away a thin layer of static. step 1: vague shapes emerge from nothing. step 10: composition and color take form. step 20: structure solidifies. step 30: fine details and textures sharpen. all of this runs through PyTorch, which is the software layer between ComfyUI and the GPU. when we click generate, ComfyUI tells PyTorch what to do. PyTorch translates those instructions into math (matrix multiplications, attention calculations). then PyTorch hands that math to CUDA, which is NVIDIA's software that tells the physical GPU cores exactly what to compute. ComfyUI is the cockpit. PyTorch is the translator. CUDA is the foreman on the factory floor. this is why denoise strength matters in img2img. at 0.7, we skip the first 30% of steps ... the large-scale structure is already set by our input image. at 1.0, it starts from pure noise. early steps decide composition, late steps decide detail. if our compositions are off, more steps won't fix it. change the prompt or seed instead. steps beyond 30 on flux are usually wasted compute.`,
     detail: `each step is a full forward pass through the Flux transformer. the model takes the noisy latent + prompt conditioning + guidance value + timestep and outputs a noise prediction. the network doesn't predict the final image directly ... it predicts what noise is present at this step. subtract that predicted noise (scaled by the sampler) and we get a slightly cleaner latent. the timestep tells the model how noisy the current state is, which changes its behavior. early steps (high noise) focus on large-scale structure. late steps (low noise) focus on fine detail.`,
     hardware: `each of our 30 steps pushes the full Flux model through the tensor cores. that's all 19 double-stream blocks and 38 single-stream blocks, each containing multi-head attention + feedforward layers. for a single 1024px generation at 30 steps, the 5090 executes thousands of large matrix multiplications. at the 5090's ~419 TFLOPS dense FP8 (or ~838 with sparsity), this takes seconds. a CPU would take hours.`
   },
@@ -62,8 +62,8 @@ const stages = [
     subtitle: "the navigator",
     color: "#C4A882",
     icon: "🧭",
-    oneliner: "euler walks straight. dpm++ curves smarter. karras controls the throttle.",
-    plain: `the sampler is our navigator. the model predicts where the image is, but the sampler decides how to walk there. think of it like driving to a destination. Euler drives in a straight line each step. DPM++ 2M checks the rearview mirror and curves its path based on where it's been. Karras scheduling means flooring it early (when far away) and feathering the brakes near the end (for precision). the scheduler controls speed. the sampler controls steering. for our creative work: euler is predictable and great for quick iterations. dpm++ 2m gives cleaner results in fewer steps. and karras scheduling almost always outperforms normal because it puts more effort where it matters most ... in the early structural decisions. for our workflow: when iterating on ideas, use euler at 15 steps for fast drafts. when we've locked a composition, switch to dpmpp_2m with karras at 28-30 steps for the final render. the quality difference is real but the speed difference is bigger.`,
+    oneliner: "the sampler decides how to remove noise. the scheduler decides how much at each step. two levers, not one.",
+    plain: `two separate things happen between each denoising step, and most artists treat them as one dropdown. the sampler is the algorithm that decides how to remove noise at each step. it looks at the model's prediction and calculates how much noise to subtract and in what direction. the scheduler is the algorithm that decides the noise levels at each step ... how much total noise should be left after step 1, step 2, step 15, step 30. think of it like driving to a destination. the sampler controls steering: Euler drives in a straight line each step. DPM++ 2M checks the rearview mirror and curves its path based on where it's been. the scheduler controls speed: normal spacing is constant. Karras front-loads the big moves early (when the image is mostly noise and decisions matter most) and eases into smaller refinements at the end. these are two independent creative levers. changing the sampler changes the character of the output. changing the scheduler changes where the effort gets concentrated. experiment with both separately to understand what each one does to our images.`,
     detail: `mathematically, denoising solves a differential equation ... the path from noise to image is a continuous curve in latent space. samplers approximate this curve with discrete steps. Euler: first-order, takes the gradient at current point and steps forward. simple but needs more steps. DPM++ 2M: multi-step method that stores the previous noise prediction and uses both current + previous to estimate a curved path. fewer steps needed for same quality. the scheduler (normal, karras, simple) controls sigma values ... the noise levels at each step. Karras front-loads bigger noise reductions early, leaving finer adjustments for later steps.`,
     hardware: `sampler math is lightweight compared to the transformer pass. it's element-wise operations (add, multiply, subtract on tensors of the same shape). these run on CUDA cores, not tensor cores. tensor cores handle the big matrix multiplications inside the model. CUDA cores handle everything between steps: noise scheduling arithmetic, tensor blending, applying the step update. think of it as tensor cores doing the heavy thinking, CUDA cores doing the bookkeeping. dPM++ 2M uses slightly more VRAM than euler because it stores a buffer of previous noise predictions (~4MB extra). negligible on 32GB.`
   },
@@ -74,8 +74,8 @@ const stages = [
     color: "#6AACB8",
     icon: "💾",
     oneliner: "32gb sounds like a lot. flux dev uses 28-30gb of it. every byte has a job.",
-    plain: `the 5090 has 32GB of video memory. think of it as a workspace desk. the model weights (the learned knowledge) take up most of the desk ... about 23GB for Flux Dev. the latent image being worked on is tiny, under 1MB. but during each step, the attention layers create huge temporary scratchpads (activation memory) that spike to 4-6GB. the VAE decoder needs its own space at the end. everything has to fit on the desk at once or generation fails. this is why we can't just "run a bigger model" ... it's not about compute speed, it's about whether the whole pipeline fits in memory at once. and it's why quantization (FP8, NF4) matters ... it shrinks model weights so we can reclaim desk space for higher resolutions or stacking LoRAs.`,
-    detail: `VRAM allocation breakdown for Flux Dev at 1024×1024: model weights ~23GB (FP16 Flux transformer + text encoders + VAE). latent tensor ~0.5MB (128×128×16 channels). kV cache for attention ~1-2GB (stores key/value pairs across layers). activation memory ~4-6GB (intermediate tensors during forward pass, freed after each layer via gradient checkpointing). optimizer states: 0 (inference only). total peak: ~28-30GB of 32GB. flash attention helps here by never materializing the full attention matrix, saving gigabytes of activation memory. this is why Flux Dev fits on a 5090 but struggles on 24GB cards without quantization. running FP8 quantization drops model weights to ~12GB, giving us breathing room for higher resolutions.`,
+    plain: `the 5090 has 32GB of video memory. think of it as a workspace desk. the model weights (the learned knowledge) take up most of the desk ... about 22GB for Flux Dev (transformer + text encoders + VAE). the latent image being worked on is tiny, under 1MB. but during each step, the attention layers create huge temporary scratchpads (activation memory) that spike to 4-6GB. the VAE decoder needs its own space at the end. everything has to fit on the desk at once or generation fails. this is why we can't just "run a bigger model" ... it's not about compute speed, it's about whether the whole pipeline fits in memory at once. and it's why quantization (FP8, NF4) matters ... it shrinks model weights so we can reclaim desk space for higher resolutions or stacking LoRAs.`,
+    detail: `VRAM breakdown for Flux Dev at 1024×1024: the permanent residents are the model weights at ~22GB (transformer ~17GB + text encoders ~5GB + VAE ~0.3GB). the latent image is tiny at ~0.5MB. then there's the scratch paper: during each transformer layer, the model produces temporary intermediate results (activation memory) that spike to 4-6GB. these get created, used, and deleted layer by layer. the attention layers also store "key" and "value" results (~1-2GB) so patches can reference each other. flash attention is a trick that computes attention without ever building the full comparison matrix in memory, saving gigabytes of scratch space. total peak: ~28-30GB of 32GB. this is why Flux Dev fits on a 5090 but struggles on 24GB cards without quantization. FP8 quantization shrinks model weights to ~12GB, freeing space for higher resolutions or stacking LoRAs.`,
     hardware: `the 32GB GDDR7 on the 5090 connects via a 512-bit memory bus at 1,792 GB/s bandwidth. during inference, model weights stay resident in VRAM and get read into the streaming multiprocessors as needed. the L2 cache (98MB on the 5090) helps by keeping frequently accessed weights close, but the full ~22GB of model weights still need to flow through the memory bus over the course of each step. at 1,792 GB/s, this is fast but still the tightest bottleneck in the pipeline. the 5090's GDDR7 is a 77% bandwidth upgrade over the 4090's GDDR6X (1,008 GB/s), which directly translates to faster generation times.`
   },
   {
@@ -98,9 +98,143 @@ const stages = [
     oneliner: "128×128 compressed → 1024×1024 pixels. the final unzip. our image exists.",
     plain: `the denoised latent is still in compressed space (128×128). the VAE decoder is the final translator ... it unpacks our tiny grid into a full 1024×1024 pixel image with real colors. like decompressing a zip file, but for images. the math is done. the noise is gone. colors, details, textures all expand to their final resolution. our image exists. saved to disk. the 5090 exhales.`,
     detail: `the VAE (Variational Autoencoder) decoder is a convolutional neural network that upscales the latent back to pixel space. it learned during training how to reconstruct full-resolution images from compressed representations. the 16-channel latent at 128×128 becomes a 3-channel RGB image at 1024×1024 (8× spatial upscale). convolutions progressively expand the spatial dimensions while reducing channels. each upsampling block doubles the resolution.`,
-    hardware: `one more GPU forward pass, but through a much smaller model than the main transformer (~160MB weights vs ~23GB). convolution operations run on tensor cores. the output image (~12MB for 1024×1024 RGB float32) writes to VRAM, then transfers over PCIe 5.0 to system RAM where ComfyUI saves it as PNG. this final step takes ~50-100ms. total generation time for 30 steps at 1024×1024 on the 5090: roughly 8-15 seconds depending on sampler and precision settings.`
+    hardware: `one more GPU forward pass, but through a much smaller model than the main transformer (~160MB weights vs ~17GB). convolution operations run on tensor cores. the output image (~12MB for 1024×1024 RGB float32) writes to VRAM, then transfers over PCIe 5.0 to system RAM where ComfyUI saves it as PNG. this final step takes ~50-100ms. total generation time for 30 steps at 1024×1024 on the 5090: roughly 8-15 seconds depending on sampler and precision settings.`
   }
 ];
+
+const SamplerVisual = () => {
+  // Euler: straight line steps. DPM++: curved path
+  const steps = 8;
+  const w = 380;
+  const h = 140;
+  const pad = 40;
+  const graphW = w - pad * 2;
+  const graphH = h - pad - 16;
+
+  // Euler path: linear steps down
+  const eulerPts = Array.from({ length: steps + 1 }, (_, i) => {
+    const x = pad + (i / steps) * graphW;
+    const y = 16 + (1 - (1 - i / steps)) * graphH;
+    return `${x},${y}`;
+  }).join(" ");
+
+  // DPM++ path: curved (gets closer faster)
+  const dpmPts = Array.from({ length: steps + 1 }, (_, i) => {
+    const t = i / steps;
+    const curve = 1 - Math.pow(1 - t, 1.8);
+    const x = pad + t * graphW;
+    const y = 16 + (1 - (1 - curve)) * graphH;
+    return `${x},${y}`;
+  }).join(" ");
+
+  // Karras schedule: big drops early, gentle late
+  const karrasNoise = Array.from({ length: steps + 1 }, (_, i) => {
+    const t = i / steps;
+    const noise = Math.pow(1 - t, 2.2);
+    const x = pad + t * graphW;
+    const y = 16 + (1 - noise) * graphH;
+    return `${x},${y}`;
+  }).join(" ");
+
+  // Normal schedule: constant drops
+  const normalNoise = Array.from({ length: steps + 1 }, (_, i) => {
+    const x = pad + (i / steps) * graphW;
+    const y = 16 + (i / steps) * graphH;
+    return `${x},${y}`;
+  }).join(" ");
+
+  return (
+    <div style={{ marginTop: 8 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+        {/* Sampler comparison */}
+        <div style={{
+          background: "rgba(255,255,255,0.02)",
+          borderRadius: 10,
+          padding: "12px 8px 8px",
+          border: "1px solid rgba(196,168,130,0.15)"
+        }}>
+          <div style={{
+            fontSize: 10,
+            color: "#C4A882",
+            fontFamily: "'JetBrains Mono', monospace",
+            textAlign: "center",
+            marginBottom: 4,
+            letterSpacing: 1
+          }}>
+            sampler: how we walk
+          </div>
+          <svg width="100%" viewBox={`0 0 ${w} ${h}`}>
+            {/* Axis labels */}
+            <text x={pad - 4} y={14} fill="#888" fontSize="8" fontFamily="'JetBrains Mono', monospace" textAnchor="end">noise</text>
+            <text x={pad - 4} y={h - pad + 14} fill="#888" fontSize="8" fontFamily="'JetBrains Mono', monospace" textAnchor="end">clean</text>
+            <text x={pad} y={h - pad + 28} fill="#888" fontSize="8" fontFamily="'JetBrains Mono', monospace">step 1</text>
+            <text x={w - pad} y={h - pad + 28} fill="#888" fontSize="8" fontFamily="'JetBrains Mono', monospace" textAnchor="end">step {steps}</text>
+            {/* Axis lines */}
+            <line x1={pad} y1={16} x2={pad} y2={h - pad} stroke="rgba(255,255,255,0.08)" strokeWidth={1} />
+            <line x1={pad} y1={h - pad} x2={w - pad} y2={h - pad} stroke="rgba(255,255,255,0.08)" strokeWidth={1} />
+            {/* Euler: straight */}
+            <polyline points={eulerPts} fill="none" stroke="#E8725A" strokeWidth={2} opacity={0.8} />
+            {/* DPM++: curved */}
+            <polyline points={dpmPts} fill="none" stroke="#3DB8A9" strokeWidth={2} opacity={0.8} strokeDasharray="6 3" />
+            {/* Legend */}
+            <line x1={pad + 10} y1={h - 8} x2={pad + 28} y2={h - 8} stroke="#E8725A" strokeWidth={2} />
+            <text x={pad + 32} y={h - 5} fill="#bbb" fontSize="8" fontFamily="'JetBrains Mono', monospace">euler (straight)</text>
+            <line x1={pad + 150} y1={h - 8} x2={pad + 168} y2={h - 8} stroke="#3DB8A9" strokeWidth={2} strokeDasharray="6 3" />
+            <text x={pad + 172} y={h - 5} fill="#bbb" fontSize="8" fontFamily="'JetBrains Mono', monospace">dpm++ (curved)</text>
+          </svg>
+        </div>
+
+        {/* Scheduler comparison */}
+        <div style={{
+          background: "rgba(255,255,255,0.02)",
+          borderRadius: 10,
+          padding: "12px 8px 8px",
+          border: "1px solid rgba(196,168,130,0.15)"
+        }}>
+          <div style={{
+            fontSize: 10,
+            color: "#C4A882",
+            fontFamily: "'JetBrains Mono', monospace",
+            textAlign: "center",
+            marginBottom: 4,
+            letterSpacing: 1
+          }}>
+            scheduler: where effort lands
+          </div>
+          <svg width="100%" viewBox={`0 0 ${w} ${h}`}>
+            {/* Axis labels */}
+            <text x={pad - 4} y={14} fill="#888" fontSize="8" fontFamily="'JetBrains Mono', monospace" textAnchor="end">high</text>
+            <text x={pad - 4} y={h - pad + 14} fill="#888" fontSize="8" fontFamily="'JetBrains Mono', monospace" textAnchor="end">low</text>
+            <text x={pad} y={h - pad + 28} fill="#888" fontSize="8" fontFamily="'JetBrains Mono', monospace">step 1</text>
+            <text x={w - pad} y={h - pad + 28} fill="#888" fontSize="8" fontFamily="'JetBrains Mono', monospace" textAnchor="end">step {steps}</text>
+            {/* Axis lines */}
+            <line x1={pad} y1={16} x2={pad} y2={h - pad} stroke="rgba(255,255,255,0.08)" strokeWidth={1} />
+            <line x1={pad} y1={h - pad} x2={w - pad} y2={h - pad} stroke="rgba(255,255,255,0.08)" strokeWidth={1} />
+            {/* Normal: linear */}
+            <polyline points={normalNoise} fill="none" stroke="#E8725A" strokeWidth={2} opacity={0.8} />
+            {/* Karras: steep early, gentle late */}
+            <polyline points={karrasNoise} fill="none" stroke="#B080D0" strokeWidth={2} opacity={0.8} strokeDasharray="6 3" />
+            {/* Legend */}
+            <line x1={pad + 10} y1={h - 8} x2={pad + 28} y2={h - 8} stroke="#E8725A" strokeWidth={2} />
+            <text x={pad + 32} y={h - 5} fill="#bbb" fontSize="8" fontFamily="'JetBrains Mono', monospace">normal (even)</text>
+            <line x1={pad + 150} y1={h - 8} x2={pad + 168} y2={h - 8} stroke="#B080D0" strokeWidth={2} strokeDasharray="6 3" />
+            <text x={pad + 172} y={h - 5} fill="#bbb" fontSize="8" fontFamily="'JetBrains Mono', monospace">karras (front-loaded)</text>
+          </svg>
+        </div>
+      </div>
+      <div style={{
+        fontSize: 10,
+        color: "#999",
+        fontFamily: "'JetBrains Mono', monospace",
+        textAlign: "center",
+        marginTop: 8,
+        lineHeight: 1.6
+      }}>
+        same number of steps, same compute cost. the difference is where the work lands.
+      </div>
+    </div>
+  );
+};
 
 const VRAMBar = () => {
   const segments = [
@@ -412,7 +546,7 @@ const Takeaways = () => {
     {
       num: "04",
       title: "vram bandwidth is the real bottleneck, not compute",
-      text: "the 5090's tensor cores can crunch numbers faster than memory can feed them data. generation speed is limited by how fast 23gb of model weights can be read from vram each step (1,792 gb/s). both compute power and memory speed matter, but for image generation, faster vram (gddr7) often has a more noticeable impact on generation time than adding more cores.",
+      text: "the 5090's tensor cores can crunch numbers faster than memory can feed them data. generation speed is limited by how fast ~22gb of model weights can be read from vram each step (1,792 gb/s). both compute power and memory speed matter, but for image generation, faster vram (gddr7) often has a more noticeable impact on generation time than adding more cores.",
       color: "#6AACB8"
     },
     {
@@ -582,6 +716,7 @@ export default function GPUExplainer() {
   const panels = [
     { id: "takeaways", label: "💡 5 things most artists don't know", component: <Takeaways /> },
     { id: "flow", label: "🔀 full hardware flow diagram", component: <FlowDiagram /> },
+    { id: "sampler", label: "🧭 sampler vs scheduler (visual)", component: <SamplerVisual /> },
     { id: "cores", label: "⚡ cuda cores vs 🔥 tensor cores", component: <CoreComparison /> },
     { id: "vram", label: "💾 vram allocation map (32gb)", component: <VRAMBar /> },
     { id: "resolution", label: "📐 resolution scaling (quadratic pain)", component: <ResolutionScale /> },
